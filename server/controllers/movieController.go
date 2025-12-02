@@ -3,7 +3,6 @@ package controllers
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -185,7 +184,7 @@ func GetReviewRanking(admin_review string) (string, int, error) {
 
 	err = godotenv.Load()
 	if err != nil {
-		log.Println("Warning: .env file not found")
+		utils.Warn("Unable to load .env file", utils.ErrorFields(err)...)
 	}
 
 	DEEPSEEK_API_KEY := os.Getenv("DEEPSEEK_API_KEY")
@@ -256,7 +255,7 @@ func GetRecommendedMovies() gin.HandlerFunc {
 		}
 		err = godotenv.Load()
 		if err != nil {
-			log.Println("Warning: .env file not found")
+			utils.Warn("Unable to load .env file", utils.ErrorFields(err)...)
 		}
 		var recommendedMovieLimitVal int64 = 5
 		recommendedMovieLimitStr := os.Getenv("RECOMMENDED_MOVIE_LIMIT")

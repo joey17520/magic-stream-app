@@ -1,51 +1,161 @@
 package database
 
 import (
-	"fmt"
-	"log"
+	"context"
 	"os"
+	"time"
 
 	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.uber.org/zap"
 )
 
-func DBInstance() *mongo.Client {
+var (
+	Client *mongo.Client
+	logger *zap.Logger
+)
+
+// initLogger 初始化数据库日志记录器
+func initLogger() {
+	if logger == nil {
+		// 创建简单的控制台日志记录器
+		config := zap.NewProductionConfig()
+		config.OutputPaths = []string{"stdout"}
+		config.ErrorOutputPaths = []string{"stderr"}
+
+		var err error
+		logger, err = config.Build()
+		if err != nil {
+			// 如果无法创建zap记录器，使用默认的
+			logger = zap.NewNop()
+		}
+	}
+}
+
+// getLogger 获取日志记录器
+func getLogger() *zap.Logger {
+	if logger == nil {
+		initLogger()
+	}
+	return logger
+}
+
+// InitDB 初始化数据库连接
+func InitDB() error {
+	logger := getLogger()
+
+	startTime := time.Now()
+
+	// 加载环境变量
 	err := godotenv.Load()
 	if err != nil {
-		log.Println("Warning: unable to found .env file")
+		logger.Warn("Unable to load .env file", zap.Error(err))
 	}
 
 	MongoDB := os.Getenv("MONGODB_URI")
 	if MongoDB == "" {
-		log.Fatal("MONGODB_URI not set!")
-	}
-
-	fmt.Println("MongoDB URI: ", MongoDB)
-
-	clientOptions := options.Client().ApplyURI(MongoDB)
-	client, err := mongo.Connect(clientOptions)
-	if err != nil {
-		log.Fatal("Failed to connect Mongodb: ", err)
-	}
-
-	return client
-}
-
-var Client *mongo.Client = DBInstance()
-
-func OpenCollection(collectionName string) *mongo.Collection {
-	err := godotenv.Load()
-	if err != nil {
-		log.Println("Warning: unable to found .env file")
+		logger.Fatal("MONGODB_URI environment variable is not set")
 	}
 
 	databaseName := os.Getenv("DATABASE_NAME")
+	if databaseName == "" {
+		databaseName = "magicstream"
+	}
+
+	logger.Info("Connecting to MongoDB",
+		zap.String("database", databaseName),
+		zap.String("uri_length", string(rune(len(MongoDB)))),
+	)
+
+	clientOptions := options.Client().ApplyURI(MongoDB)
+
+	// 创建客户端
+	client, err := mongo.Connect(clientOptions)
+	if err != nil {
+		logger.Error("Failed to create MongoDB client",
+			zap.Error(err),
+			zap.String("database", databaseName),
+		)
+		return err
+	}
+
+	// 设置连接超时
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 测试连接
+	err = client.Ping(ctx, nil)
+	if err != nil {
+		logger.Error("Failed to ping MongoDB",
+			zap.Error(err),
+			zap.String("database", databaseName),
+		)
+		return err
+	}
+
+	Client = client
+
+	duration := time.Since(startTime)
+	logger.Info("MongoDB connection established successfully",
+		zap.String("database", databaseName),
+		zap.Duration("connection_time", duration),
+	)
+
+	return nil
+}
+
+// GetDBInstance 获取数据库实例（单例模式）
+func GetDBInstance() *mongo.Client {
+	if Client == nil {
+		if err := InitDB(); err != nil {
+			getLogger().Fatal("Failed to initialize database", zap.Error(err))
+		}
+	}
+	return Client
+}
+
+// OpenCollection 打开指定集合
+func OpenCollection(collectionName string) *mongo.Collection {
+	logger := getLogger()
+
+	if Client == nil {
+		GetDBInstance()
+	}
+
+	databaseName := os.Getenv("DATABASE_NAME")
+	if databaseName == "" {
+		databaseName = "magicstream"
+	}
+
 	collection := Client.Database(databaseName).Collection(collectionName)
 
 	if collection == nil {
+		logger.Error("Failed to open collection",
+			zap.String("collection", collectionName),
+			zap.String("database", databaseName),
+		)
 		return nil
 	}
 
+	logger.Debug("Collection opened",
+		zap.String("collection", collectionName),
+		zap.String("database", databaseName),
+	)
+
 	return collection
+}
+
+// CloseDB 关闭数据库连接
+func CloseDB() {
+	if Client != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := Client.Disconnect(ctx); err != nil {
+			getLogger().Error("Failed to disconnect from MongoDB", zap.Error(err))
+		} else {
+			getLogger().Info("MongoDB connection closed")
+		}
+	}
 }

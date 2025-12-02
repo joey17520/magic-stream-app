@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -164,7 +163,7 @@ func LogoutHandler() gin.HandlerFunc {
 			return
 		}
 
-		fmt.Println("User ID from logout request: ", UserLogout.UserId)
+		utils.Info("User logout request", utils.HTTPRequestFields("POST", "/logout", "200", 0)...)
 
 		err = utils.UpdateAllTokens(UserLogout.UserId, "", "")
 		if err != nil {

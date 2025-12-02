@@ -8,7 +8,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/joey17520/magic-stream-app/database"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
@@ -25,7 +24,13 @@ type SignedDetails struct {
 var SECRET_KEY string = os.Getenv("SECRET_KEY")
 var SECRET_REFRESH_KEY string = os.Getenv("SECRET_REFRESH_KEY")
 
-var userCollection *mongo.Collection = database.OpenCollection("users")
+// userCollection将在运行时通过SetUserCollection设置
+var userCollection *mongo.Collection
+
+// SetUserCollection 设置用户集合，用于打破导入循环
+func SetUserCollection(collection *mongo.Collection) {
+	userCollection = collection
+}
 
 func GenerateAllTokens(email, firstName, lastName, role, userId string) (string, string, error) {
 	claims := &SignedDetails{
