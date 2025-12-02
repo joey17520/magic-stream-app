@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: "MagicStream Dashboards"
+    orgId: 1
+    folder: "MagicStream"
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/dashboards

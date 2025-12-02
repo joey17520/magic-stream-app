@@ -1,0 +1,104 @@
+services:
+  # MongoDB数据库服务
+  mongodb:
+    image: mongo:8
+    container_name: magic-stream-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=admin123
+      - MONGO_INITDB_DATABASE=magicstream
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks:
+      - magic-stream-network
+
+  # 后端API服务
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: magic-stream-api
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    environment:
+      - GIN_MODE=release
+      - TZ=Asia/Shanghai
+      - LOG_LEVEL=info
+      - MONGODB_URI=mongodb://admin:admin123@mongodb:27017/magicstream?authSource=admin
+      - DATABASE_NAME=magicstream
+      - SECRET_KEY=your-secret-key-change-in-production
+      - SECRET_REFRESH_KEY=your-refresh-secret-key-change-in-production
+      - ALLOWED_ORIGINS=http://localhost:5173,http://localhost:80
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - BASE_PROMPT_TEMPLATE=${BASE_PROMPT_TEMPLATE:-}
+      - RECOMMENDED_MOVIE_LIMIT=5
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8088/health",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - magic-stream-network
+
+  # 前端应用服务
+  frontend:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: magic-stream-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    environment:
+      - TZ=Asia/Shanghai
+      - VITE_API_BASE_URL=http://localhost:8088
+    depends_on:
+      - api
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:80/health",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - magic-stream-network
+
+# 数据卷定义
+volumes:
+  mongodb_data:
+    driver: local
+
+# 网络定义
+networks:
+  magic-stream-network:
+    driver: bridge

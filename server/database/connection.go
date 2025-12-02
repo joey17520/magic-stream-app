@@ -2,10 +2,9 @@ package database
 
 import (
 	"context"
-	"os"
 	"time"
 
-	"github.com/joho/godotenv"
+	"github.com/joey17520/magic-stream-app/config"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.uber.org/zap"
@@ -14,18 +13,19 @@ import (
 var (
 	Client *mongo.Client
 	logger *zap.Logger
+	cfg    *config.Config
 )
 
 // initLogger 初始化数据库日志记录器
 func initLogger() {
 	if logger == nil {
 		// 创建简单的控制台日志记录器
-		config := zap.NewProductionConfig()
-		config.OutputPaths = []string{"stdout"}
-		config.ErrorOutputPaths = []string{"stderr"}
+		zapConfig := zap.NewProductionConfig()
+		zapConfig.OutputPaths = []string{"stdout"}
+		zapConfig.ErrorOutputPaths = []string{"stderr"}
 
 		var err error
-		logger, err = config.Build()
+		logger, err = zapConfig.Build()
 		if err != nil {
 			// 如果无法创建zap记录器，使用默认的
 			logger = zap.NewNop()
@@ -42,23 +42,18 @@ func getLogger() *zap.Logger {
 }
 
 // InitDB 初始化数据库连接
-func InitDB() error {
+func InitDB(config *config.Config) error {
 	logger := getLogger()
+	cfg = config
 
 	startTime := time.Now()
 
-	// 加载环境变量
-	err := godotenv.Load()
-	if err != nil {
-		logger.Warn("Unable to load .env file", zap.Error(err))
-	}
-
-	MongoDB := os.Getenv("MONGODB_URI")
+	MongoDB := cfg.MongoDBURI
 	if MongoDB == "" {
 		logger.Fatal("MONGODB_URI environment variable is not set")
 	}
 
-	databaseName := os.Getenv("DATABASE_NAME")
+	databaseName := cfg.DatabaseName
 	if databaseName == "" {
 		databaseName = "magicstream"
 	}
@@ -108,7 +103,10 @@ func InitDB() error {
 // GetDBInstance 获取数据库实例（单例模式）
 func GetDBInstance() *mongo.Client {
 	if Client == nil {
-		if err := InitDB(); err != nil {
+		if cfg == nil {
+			getLogger().Fatal("Database configuration not initialized. Call InitDB first.")
+		}
+		if err := InitDB(cfg); err != nil {
 			getLogger().Fatal("Failed to initialize database", zap.Error(err))
 		}
 	}
@@ -123,7 +121,7 @@ func OpenCollection(collectionName string) *mongo.Collection {
 		GetDBInstance()
 	}
 
-	databaseName := os.Getenv("DATABASE_NAME")
+	databaseName := cfg.DatabaseName
 	if databaseName == "" {
 		databaseName = "magicstream"
 	}

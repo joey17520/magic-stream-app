@@ -1,12 +1,11 @@
 package main
 
 import (
-	"os"
-	"strings"
 	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/joey17520/magic-stream-app/config"
 	"github.com/joey17520/magic-stream-app/database"
 	"github.com/joey17520/magic-stream-app/middlewares"
 	"github.com/joey17520/magic-stream-app/routes"
@@ -24,9 +23,12 @@ func main() {
 	logger := utils.GetLogger()
 	logger.Info("Initializing MagicStream server")
 
+	// 加载配置
+	cfg := config.LoadConfig(logger)
+
 	// 初始化数据库连接
 	logger.Info("Initializing database connection")
-	if err := database.InitDB(); err != nil {
+	if err := database.InitDB(cfg); err != nil {
 		logger.Fatal("Failed to initialize database", zap.Error(err))
 	}
 	defer database.CloseDB()
@@ -40,20 +42,9 @@ func main() {
 
 	router := gin.New()
 
-	// 使用http-only Cookie必须指定信任源
-	allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
-	var origins []string
-	if allowedOrigins != "" {
-		origins = strings.Split(allowedOrigins, ",")
-		for i := range origins {
-			origins[i] = strings.TrimSpace(origins[i])
-		}
-	} else {
-		origins = []string{"http://localhost:5173"}
-	}
-
-	config := cors.Config{
-		AllowOrigins:     origins,
+	// CORS配置
+	corsConfig := cors.Config{
+		AllowOrigins:     cfg.AllowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
 		ExposeHeaders:    []string{"Content-Length"},
@@ -62,7 +53,7 @@ func main() {
 	}
 
 	// 中间件顺序很重要：CORS -> 结构化日志 -> 指标
-	router.Use(cors.New(config))
+	router.Use(cors.New(corsConfig))
 	router.Use(StructuredLogger(logger))
 	router.Use(middlewares.MetricsMiddleware())
 
@@ -70,8 +61,8 @@ func main() {
 	routes.SetupProtectedRoutes(router)
 
 	logger.Info("Starting MagicStream server",
-		zap.String("port", "8088"),
-		zap.Strings("allowed_origins", origins),
+		zap.String("port", cfg.ServerPort),
+		zap.Strings("allowed_origins", cfg.AllowedOrigins),
 	)
 
 	logger.Info("Health check endpoints available",
@@ -81,7 +72,7 @@ func main() {
 		zap.String("metrics_endpoint", "GET /metrics"),
 	)
 
-	if err := router.Run(":8088"); err != nil {
+	if err := router.Run(":" + cfg.ServerPort); err != nil {
 		logger.Fatal("Failed to start server", zap.Error(err))
 	}
 }

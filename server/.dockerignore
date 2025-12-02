@@ -1,0 +1,50 @@
+# 忽略git相关文件
+.git
+.gitignore
+
+# 忽略编辑器文件
+.vscode
+.idea
+*.swp
+*.swo
+
+# 忽略测试和开发文件
+*_test.go
+*.test
+coverage.out
+
+# 忽略构建产物
+magic-stream-app
+dist/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# 忽略日志文件
+*.log
+logs/
+
+# 忽略环境配置文件（生产环境应该使用不同的配置方式）
+.env
+.env.local
+
+# 忽略文档文件
+README.md
+LICENSE
+*.pdf
+*.doc
+*.docx
+
+# 忽略临时文件
+tmp/
+temp/
+
+# 忽略node_modules（如果有前端文件）
+node_modules/
+
+# 忽略Docker构建缓存
+.dockerignore
+Dockerfile
+docker-compose.yml
