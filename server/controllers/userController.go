@@ -15,7 +15,24 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-var userCollection *mongo.Collection = database.OpenCollection("users")
+var (
+	userCollection             *mongo.Collection
+	userCollectionsInitialized bool
+)
+
+// initUserCollections 延迟初始化用户集合
+func initUserCollections() {
+	if !userCollectionsInitialized {
+		userCollection = database.OpenCollection("users")
+		userCollectionsInitialized = true
+	}
+}
+
+// getUserCollection 获取用户集合
+func getUserCollection() *mongo.Collection {
+	initUserCollections()
+	return userCollection
+}
 
 // 加密函数
 func HashPassword(password string) (string, error) {
@@ -51,7 +68,8 @@ func RegisterUser() gin.HandlerFunc {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		count, err := userCollection.CountDocuments(ctx, bson.M{"email": user.Email})
+		collection := getUserCollection()
+		count, err := collection.CountDocuments(ctx, bson.M{"email": user.Email})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing user"})
 			return
@@ -65,7 +83,7 @@ func RegisterUser() gin.HandlerFunc {
 		user.UpdatedAt = time.Now()
 		user.Password = hashedPassword
 
-		result, err := userCollection.InsertOne(ctx, user)
+		result, err := collection.InsertOne(ctx, user)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
 			return
@@ -89,7 +107,8 @@ func LoginUser() gin.HandlerFunc {
 
 		var foundUser models.User
 
-		err := userCollection.FindOne(ctx, bson.M{"email": userLogin.Email}).Decode(&foundUser)
+		collection := getUserCollection()
+		err := collection.FindOne(ctx, bson.M{"email": userLogin.Email}).Decode(&foundUser)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, "No email address was found.")
 			return
@@ -216,7 +235,8 @@ func RefreshTokenHandler() gin.HandlerFunc {
 		}
 
 		var user models.User
-		err = userCollection.FindOne(ctx, bson.M{"user_id": claim.UserId}).Decode(&user)
+		collection := getUserCollection()
+		err = collection.FindOne(ctx, bson.M{"user_id": claim.UserId}).Decode(&user)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
 			return

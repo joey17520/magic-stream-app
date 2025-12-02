@@ -21,9 +21,40 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-var movieCollection *mongo.Collection = database.OpenCollection("movies")
-var rankingCollection *mongo.Collection = database.OpenCollection("rankings")
-var genreCollection *mongo.Collection = database.OpenCollection("genres")
+var (
+	movieCollection        *mongo.Collection
+	rankingCollection      *mongo.Collection
+	genreCollection        *mongo.Collection
+	collectionsInitialized bool
+)
+
+// initCollections 延迟初始化数据库集合
+func initCollections() {
+	if !collectionsInitialized {
+		movieCollection = database.OpenCollection("movies")
+		rankingCollection = database.OpenCollection("rankings")
+		genreCollection = database.OpenCollection("genres")
+		collectionsInitialized = true
+	}
+}
+
+// getMovieCollection 获取电影集合
+func getMovieCollection() *mongo.Collection {
+	initCollections()
+	return movieCollection
+}
+
+// getRankingCollection 获取评分集合
+func getRankingCollection() *mongo.Collection {
+	initCollections()
+	return rankingCollection
+}
+
+// getGenreCollection 获取类型集合
+func getGenreCollection() *mongo.Collection {
+	initCollections()
+	return genreCollection
+}
 
 var validate = validator.New()
 
@@ -34,7 +65,8 @@ func GetMovies() gin.HandlerFunc {
 
 		var movies []models.Movie
 
-		cursor, err := movieCollection.Find(ctx, bson.M{})
+		collection := getMovieCollection()
+		cursor, err := collection.Find(ctx, bson.M{})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch movies."})
 			return
@@ -63,7 +95,8 @@ func GetMovie() gin.HandlerFunc {
 		}
 		var movie models.Movie
 
-		err := movieCollection.FindOne(ctx, bson.M{"imdb_id": movieID}).Decode(&movie)
+		collection := getMovieCollection()
+		err := collection.FindOne(ctx, bson.M{"imdb_id": movieID}).Decode(&movie)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Movie not found"})
 			return
@@ -88,7 +121,8 @@ func AddMovie() gin.HandlerFunc {
 			return
 		}
 
-		result, err := movieCollection.InsertOne(ctx, movie)
+		collection := getMovieCollection()
+		result, err := collection.InsertOne(ctx, movie)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add movie"})
 			return
@@ -148,7 +182,8 @@ func AdminReviewUpdate() gin.HandlerFunc {
 		var ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		result, err := movieCollection.UpdateOne(ctx, filter, update)
+		collection := getMovieCollection()
+		result, err := collection.UpdateOne(ctx, filter, update)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error updating movie"})
 			return
@@ -227,7 +262,8 @@ func GetRankings() ([]models.Ranking, error) {
 	var ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cursor, err := rankingCollection.Find(ctx, bson.M{})
+	collection := getRankingCollection()
+	cursor, err := collection.Find(ctx, bson.M{})
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +308,8 @@ func GetRecommendedMovies() gin.HandlerFunc {
 		var ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		cursor, err := movieCollection.Find(ctx, filter, findOptions)
+		collection := getMovieCollection()
+		cursor, err := collection.Find(ctx, filter, findOptions)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching recommended movies"})
 			return
@@ -293,6 +330,9 @@ func GetUsersFavoriteGenres(userId string) ([]string, error) {
 	var ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// 直接打开用户集合
+	userCollection := database.OpenCollection("users")
+
 	filter := bson.M{"user_id": userId}
 
 	projection := bson.M{
@@ -308,6 +348,7 @@ func GetUsersFavoriteGenres(userId string) ([]string, error) {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return []string{}, err
 		}
+		return []string{}, err
 	}
 
 	favGenresArray, ok := result["favorite_genres"].(bson.A)
@@ -339,7 +380,8 @@ func GetGenres() gin.HandlerFunc {
 
 		var genres []models.Genre
 
-		cursor, err := genreCollection.Find(ctx, bson.M{})
+		collection := getGenreCollection()
+		cursor, err := collection.Find(ctx, bson.M{})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching movie genres"})
 			return
