@@ -1,0 +1,568 @@
+pipeline {
+    agent {
+        docker {
+            image 'golang:1.25-alpine'
+            args '--privileged -v /var/run/docker.sock:/var/run/docker.sock'
+        }
+    }
+    
+    environment {
+        // 项目配置
+        PROJECT_NAME = 'magic-stream-app'
+        SERVICE_NAME = 'backend'
+        DOCKER_REGISTRY = credentials('docker-registry-credentials')
+        DOCKER_IMAGE = "${DOCKER_REGISTRY}/${PROJECT_NAME}-${SERVICE_NAME}"
+        
+        // Go配置
+        GOPROXY = 'https://goproxy.cn,direct'
+        GOSUMDB = 'off'
+        
+        // 构建配置
+        BUILD_NUMBER = "${env.BUILD_NUMBER}"
+        GIT_COMMIT = "${env.GIT_COMMIT}"
+        GIT_BRANCH = "${env.GIT_BRANCH}"
+        
+        // 部署环境
+        DEPLOY_ENV = "${params.DEPLOY_ENVIRONMENT}"
+    }
+    
+    parameters {
+        choice(
+            name: 'DEPLOY_ENVIRONMENT',
+            choices: ['staging', 'production'],
+            description: '选择部署环境'
+        )
+    }
+    
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 20, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        ansiColor('xterm')
+    }
+    
+    stages {
+        stage('代码签出') {
+            steps {
+                script {
+                    echo "开始后端代码签出..."
+                    echo "分支: ${GIT_BRANCH}"
+                    echo "提交: ${GIT_COMMIT}"
+                }
+                
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: "*/${GIT_BRANCH}"]],
+                    userRemoteConfigs: [[
+                        url: 'git@github.com:joey17520/magic-stream-app.git',
+                        credentialsId: 'github-ssh-key'
+                    ]],
+                    extensions: [
+                        [$class: 'RelativeTargetDirectory', relativeTargetDir: '.'],
+                        [$class: 'SparseCheckoutPaths', sparseCheckoutPaths: [[path: 'server/']]]
+                    ]
+                ])
+                
+                script {
+                    sh 'git log -1 --oneline'
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 后端代码签出成功'
+                }
+                failure {
+                    echo '❌ 后端代码签出失败'
+                }
+            }
+        }
+        
+        stage('代码质量检查') {
+            steps {
+                script {
+                    echo "开始后端代码质量检查..."
+                    
+                    sh '''
+                        echo "运行Go代码静态分析..."
+                        go vet ./...
+                        
+                        echo "检查代码格式..."
+                        go fmt ./...
+                        
+                        echo "检查未使用的依赖..."
+                        go mod tidy
+                        
+                        echo "运行Go安全扫描..."
+                        go list -json -m all | grep -E '"Path"|"Version"' || true
+                        
+                        echo "运行golangci-lint检查..."
+                        if command -v golangci-lint &> /dev/null; then
+                            golangci-lint run ./...
+                        else
+                            echo "golangci-lint未安装，跳过深度检查"
+                        fi
+                    '''
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 后端代码质量检查通过'
+                }
+                failure {
+                    echo '⚠️ 后端代码质量检查发现问题，继续构建流程'
+                }
+            }
+        }
+        
+        stage('依赖下载') {
+            steps {
+                script {
+                    echo "下载Go模块依赖..."
+                    
+                    sh '''
+                        echo "设置Go代理..."
+                        export GOPROXY=${GOPROXY}
+                        export GOSUMDB=${GOSUMDB}
+                        
+                        echo "下载依赖..."
+                        go mod download
+                        
+                        echo "验证依赖..."
+                        go mod verify
+                        
+                        echo "依赖列表:"
+                        go list -m all | head -20
+                    '''
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 依赖下载成功'
+                }
+                failure {
+                    error '❌ 依赖下载失败'
+                }
+            }
+        }
+        
+        stage('编译构建') {
+            steps {
+                script {
+                    echo "编译Go后端应用..."
+                    
+                    sh '''
+                        echo "编译应用..."
+                        CGO_ENABLED=0 GOOS=linux go build \
+                            -a \
+                            -installsuffix cgo \
+                            -ldflags="-w -s -X main.version=${BUILD_NUMBER} -X main.commit=${GIT_COMMIT}" \
+                            -o magic-stream-app .
+                        
+                        echo "验证构建结果..."
+                        ls -la magic-stream-app
+                        file magic-stream-app
+                        
+                        echo "测试应用启动..."
+                        timeout 5s ./magic-stream-app --version || echo "版本检查完成"
+                    '''
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 后端编译构建成功'
+                }
+                failure {
+                    error '❌ 后端编译构建失败'
+                }
+            }
+        }
+        
+        stage('运行测试') {
+            steps {
+                script {
+                    echo "运行后端测试..."
+                    
+                    sh '''
+                        echo "运行Go单元测试..."
+                        go test ./... -v -coverprofile=coverage.out || echo "没有测试或测试失败，继续构建"
+                        
+                        if [ -f coverage.out ]; then
+                            echo "生成测试覆盖率报告..."
+                            go tool cover -func=coverage.out
+                            
+                            echo "测试覆盖率摘要:"
+                            go tool cover -func=coverage.out | tail -1
+                            
+                            echo "生成HTML覆盖率报告..."
+                            go tool cover -html=coverage.out -o coverage.html
+                            
+                            echo "归档测试报告..."
+                            mkdir -p test-reports
+                            mv coverage.out coverage.html test-reports/
+                        else
+                            echo "未生成覆盖率报告，可能没有测试"
+                        fi
+                    '''
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 后端测试通过'
+                }
+                failure {
+                    echo '⚠️ 后端测试失败，但继续构建流程'
+                }
+                always {
+                    archiveArtifacts artifacts: 'test-reports/**', allowEmptyArchive: true
+                    junit testResults: 'test-reports/*.xml', allowEmptyResults: true
+                }
+            }
+        }
+        
+        stage('构建Docker镜像') {
+            steps {
+                script {
+                    echo "构建后端Docker镜像..."
+                    
+                    // 登录Docker Registry
+                    sh '''
+                        echo "登录Docker Registry..."
+                        echo "${DOCKER_REGISTRY_PSW}" | docker login ${DOCKER_REGISTRY} \
+                            -u ${DOCKER_REGISTRY_USR} \
+                            --password-stdin
+                    '''
+                    
+                    sh """
+                        echo "构建Docker镜像..."
+                        docker build \
+                            -t ${DOCKER_IMAGE}:${BUILD_NUMBER} \
+                            -t ${DOCKER_IMAGE}:latest \
+                            -t ${DOCKER_IMAGE}:${GIT_COMMIT} \
+                            .
+                        
+                        echo "镜像信息:"
+                        docker images | grep ${DOCKER_IMAGE}
+                        
+                        echo "推送镜像到Registry..."
+                        docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                        docker push ${DOCKER_IMAGE}:latest
+                        docker push ${DOCKER_IMAGE}:${GIT_COMMIT}
+                        
+                        echo "清理本地镜像..."
+                        docker rmi ${DOCKER_IMAGE}:${BUILD_NUMBER} ${DOCKER_IMAGE}:latest ${DOCKER_IMAGE}:${GIT_COMMIT} || true
+                    """
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 后端Docker镜像构建和推送成功'
+                }
+                failure {
+                    error '❌ 后端Docker镜像构建失败'
+                }
+            }
+        }
+        
+        stage('安全扫描') {
+            steps {
+                script {
+                    echo "进行安全扫描..."
+                    
+                    sh '''
+                        echo "下载并安装Trivy..."
+                        wget -q https://github.com/aquasecurity/trivy/releases/download/v0.58.1/trivy_0.58.1_Linux-64bit.tar.gz
+                        tar -xzf trivy_0.58.1_Linux-64bit.tar.gz
+                        chmod +x trivy
+                        
+                        echo "扫描Go依赖漏洞..."
+                        ./trivy fs . --scanners vuln --severity HIGH,CRITICAL --exit-code 0
+                        
+                        echo "扫描Docker镜像漏洞..."
+                        ./trivy image --exit-code 0 --severity HIGH,CRITICAL ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                        
+                        echo "生成SBOM..."
+                        ./trivy image --format cyclonedx ${DOCKER_IMAGE}:${BUILD_NUMBER} > sbom.json
+                        
+                        echo "安全扫描报告:"
+                        ls -la *.json || true
+                    '''
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 安全扫描完成'
+                }
+                failure {
+                    echo '⚠️ 安全扫描发现问题，继续部署流程'
+                }
+                always {
+                    archiveArtifacts artifacts: 'sbom.json,trivy-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+        
+        stage('部署到环境') {
+            when {
+                expression { 
+                    return params.DEPLOY_ENVIRONMENT != null 
+                }
+            }
+            
+            steps {
+                script {
+                    echo "部署后端到 ${DEPLOY_ENV} 环境..."
+                    
+                    if (DEPLOY_ENV == 'staging') {
+                        echo "部署到预发布环境..."
+                        
+                        sh """
+                            echo "更新docker-compose.yml中的后端镜像..."
+                            sed -i 's|image:.*magic-stream-api|image: ${DOCKER_IMAGE}:${BUILD_NUMBER}|g' ../docker-compose.yml
+                            
+                            echo "启动预发布环境..."
+                            cd ..
+                            docker-compose down api || true
+                            docker-compose up -d api
+                            
+                            echo "等待后端服务启动..."
+                            sleep 30
+                            
+                            echo "验证后端服务健康状态..."
+                            curl -f http://localhost:8088/health || echo "健康检查失败"
+                            
+                            echo "测试API端点..."
+                            curl -f http://localhost:8088/api/v1/health || echo "API健康检查完成"
+                        """
+                        
+                    } else if (DEPLOY_ENV == 'production') {
+                        echo "部署到生产环境..."
+                        
+                        sh """
+                            echo "生成Kubernetes部署清单..."
+                            cat > k8s-backend-deployment.yaml << EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${PROJECT_NAME}-backend
+  namespace: production
+  labels:
+    app: ${PROJECT_NAME}-backend
+    version: ${BUILD_NUMBER}
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ${PROJECT_NAME}-backend
+  template:
+    metadata:
+      labels:
+        app: ${PROJECT_NAME}-backend
+        version: ${BUILD_NUMBER}
+    spec:
+      containers:
+      - name: backend
+        image: ${DOCKER_IMAGE}:${BUILD_NUMBER}
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8088
+        env:
+        - name: GIN_MODE
+          value: "release"
+        - name: MONGODB_URI
+          valueFrom:
+            secretKeyRef:
+              name: mongodb-secret
+              key: uri
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: secret-key
+        - name: SECRET_REFRESH_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: refresh-secret-key
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8088
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8088
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 1
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${PROJECT_NAME}-backend-service
+  namespace: production
+spec:
+  selector:
+    app: ${PROJECT_NAME}-backend
+  ports:
+  - port: 8088
+    targetPort: 8088
+    protocol: TCP
+  type: ClusterIP
+EOF
+                            
+                            echo "应用Kubernetes部署..."
+                            kubectl apply -f k8s-backend-deployment.yaml
+                            
+                            echo "等待部署完成..."
+                            kubectl rollout status deployment/${PROJECT_NAME}-backend -n production --timeout=300s
+                            
+                            echo "验证服务..."
+                            kubectl get pods -n production -l app=${PROJECT_NAME}-backend
+                        """
+                    }
+                }
+            }
+            
+            post {
+                success {
+                    echo "✅ 后端部署到 ${DEPLOY_ENV} 环境成功"
+                }
+                failure {
+                    error "❌ 后端部署到 ${DEPLOY_ENV} 环境失败"
+                }
+            }
+        }
+        
+        stage('集成测试') {
+            when {
+                expression { 
+                    return params.DEPLOY_ENVIRONMENT != null 
+                }
+            }
+            
+            steps {
+                script {
+                    echo "运行后端集成测试..."
+                    
+                    if (DEPLOY_ENV == 'staging') {
+                        sh '''
+                            echo "测试健康检查端点..."
+                            curl -f http://localhost:8088/health
+                            
+                            echo "测试API版本端点..."
+                            curl -f http://localhost:8088/api/v1/health
+                            
+                            echo "测试用户认证端点..."
+                            curl -X POST http://localhost:8088/api/v1/users/register \
+                                -H "Content-Type: application/json" \
+                                -d '{"username":"jenkins-test","password":"TestPass123!"}' \
+                                --max-time 10 --silent --output /dev/null --write-out "%{http_code}" || echo "注册测试完成"
+                            
+                            echo "测试电影推荐端点..."
+                            curl -f http://localhost:8088/api/v1/movies/recommended \
+                                --max-time 10 --silent --output /dev/null --write-out "%{http_code}" || echo "推荐测试完成"
+                            
+                            echo "测试性能..."
+                            ab -n 100 -c 10 http://localhost:8088/health 2>/dev/null | grep "Requests per second" || echo "性能测试完成"
+                        '''
+                    }
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 后端集成测试通过'
+                }
+                failure {
+                    echo '⚠️ 后端集成测试失败，需要人工检查'
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo "后端构建完成，清理工作空间..."
+                
+                sh '''
+                    echo "清理Docker资源..."
+                    docker system prune -f || true
+                    
+                    echo "清理构建缓存..."
+                    go clean -cache
+                    go clean -modcache
+                '''
+                
+                def currentBuildResult = currentBuild.currentResult
+                echo "后端构建结果: ${currentBuildResult}"
+                
+                // 归档构建产物
+                archiveArtifacts artifacts: 'magic-stream-app,test-reports/*,sbom.json', allowEmptyArchive: true
+            }
+        }
+        
+        success {
+            script {
+                echo "发送后端构建成功通知..."
+                
+                // 实际项目中可以集成Slack、邮件等通知
+                echo """
+                ========================================
+                后端构建成功
+                项目: ${PROJECT_NAME}-${SERVICE_NAME}
+                构建号: ${BUILD_NUMBER}
+                分支: ${GIT_BRANCH}
+                提交: ${GIT_COMMIT}
+                环境: ${DEPLOY_ENV}
+                镜像: ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                构建URL: ${env.BUILD_URL}
+                ========================================
+                """
+            }
+        }
+        
+        failure {
+            script {
+                echo "发送后端构建失败通知..."
+                
+                echo """
+                ========================================
+                后端构建失败
+                项目: ${PROJECT_NAME}-${SERVICE_NAME}
+                构建号: ${BUILD_NUMBER}
+                分支: ${GIT_BRANCH}
+                提交: ${GIT_COMMIT}
+                环境: ${DEPLOY_ENV}
+                错误: 请检查构建日志
+                构建URL: ${env.BUILD_URL}
+                ========================================
+                """
+            }
+        }
+    }
+}

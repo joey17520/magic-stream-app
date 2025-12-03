@@ -47,7 +47,7 @@ WORKDIR /app
 COPY --from=builder /app/magic-stream-app .
 
 # 复制配置文件（如果有）
-COPY --from=builder /app/.env.example .env.example
+COPY --from=builder /app/.env .env
 
 # 设置文件权限
 RUN chown -R appuser:appuser /app

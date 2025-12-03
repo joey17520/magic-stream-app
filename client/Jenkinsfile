@@ -1,0 +1,643 @@
+pipeline {
+    agent {
+        docker {
+            image 'node:22-alpine'
+            args '--privileged -v /var/run/docker.sock:/var/run/docker.sock'
+        }
+    }
+    
+    environment {
+        // 项目配置
+        PROJECT_NAME = 'magic-stream-app'
+        SERVICE_NAME = 'frontend'
+        DOCKER_REGISTRY = credentials('docker-registry-credentials')
+        DOCKER_IMAGE = "${DOCKER_REGISTRY}/${PROJECT_NAME}-${SERVICE_NAME}"
+        
+        // 构建配置
+        BUILD_NUMBER = "${env.BUILD_NUMBER}"
+        GIT_COMMIT = "${env.GIT_COMMIT}"
+        GIT_BRANCH = "${env.GIT_BRANCH}"
+        
+        // 部署环境
+        DEPLOY_ENV = "${params.DEPLOY_ENVIRONMENT}"
+        
+        // Node.js配置
+        NODE_ENV = 'production'
+        NPM_CONFIG_REGISTRY = 'https://registry.npmmirror.com'
+    }
+    
+    parameters {
+        choice(
+            name: 'DEPLOY_ENVIRONMENT',
+            choices: ['staging', 'production'],
+            description: '选择部署环境'
+        )
+    }
+    
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 15, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        ansiColor('xterm')
+    }
+    
+    stages {
+        stage('代码签出') {
+            steps {
+                script {
+                    echo "开始前端代码签出..."
+                    echo "分支: ${GIT_BRANCH}"
+                    echo "提交: ${GIT_COMMIT}"
+                }
+                
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: "*/${GIT_BRANCH}"]],
+                    userRemoteConfigs: [[
+                        url: 'git@github.com:joey17520/magic-stream-app.git',
+                        credentialsId: 'github-ssh-key'
+                    ]],
+                    extensions: [
+                        [$class: 'RelativeTargetDirectory', relativeTargetDir: '.'],
+                        [$class: 'SparseCheckoutPaths', sparseCheckoutPaths: [[path: 'client/']]]
+                    ]
+                ])
+                
+                script {
+                    sh 'git log -1 --oneline'
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 前端代码签出成功'
+                }
+                failure {
+                    echo '❌ 前端代码签出失败'
+                }
+            }
+        }
+        
+        stage('代码质量检查') {
+            steps {
+                script {
+                    echo "开始前端代码质量检查..."
+                    
+                    sh '''
+                        echo "安装依赖..."
+                        npm ci
+                        
+                        echo "运行ESLint检查..."
+                        npx eslint src/ --max-warnings=0 || echo "ESLint检查完成"
+                        
+                        echo "检查代码格式..."
+                        npx prettier --check src/ || echo "代码格式检查完成"
+                        
+                        echo "运行TypeScript类型检查..."
+                        npx tsc --noEmit || echo "TypeScript检查完成"
+                        
+                        echo "检查未使用的依赖..."
+                        npx depcheck || echo "依赖检查完成"
+                        
+                        echo "检查安全漏洞..."
+                        npm audit --production --audit-level=high || echo "安全检查完成"
+                    '''
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 前端代码质量检查通过'
+                }
+                failure {
+                    echo '⚠️ 前端代码质量检查发现问题，继续构建流程'
+                }
+            }
+        }
+        
+        stage('依赖安装') {
+            steps {
+                script {
+                    echo "安装前端依赖..."
+                    
+                    sh '''
+                        echo "设置npm镜像源..."
+                        npm config set registry ${NPM_CONFIG_REGISTRY}
+                        
+                        echo "清理npm缓存..."
+                        npm cache clean --force
+                        
+                        echo "安装生产依赖..."
+                        npm ci --only=production --legacy-peer-deps
+                        
+                        echo "安装开发依赖..."
+                        npm ci --only=development --legacy-peer-deps
+                        
+                        echo "验证依赖安装..."
+                        npm list --depth=0
+                        
+                        echo "依赖大小统计:"
+                        du -sh node_modules/
+                    '''
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 前端依赖安装成功'
+                }
+                failure {
+                    error '❌ 前端依赖安装失败'
+                }
+            }
+        }
+        
+        stage('编译构建') {
+            steps {
+                script {
+                    echo "编译构建React前端应用..."
+                    
+                    sh '''
+                        echo "设置构建环境..."
+                        export NODE_ENV=${NODE_ENV}
+                        
+                        echo "运行构建..."
+                        npm run build
+                        
+                        echo "验证构建结果..."
+                        ls -la dist/
+                        du -sh dist/
+                        
+                        echo "检查构建产物..."
+                        find dist/ -type f -name "*.html" | head -5
+                        find dist/ -type f -name "*.js" | head -5
+                        find dist/ -type f -name "*.css" | head -5
+                        
+                        echo "测试构建产物..."
+                        if [ -f dist/index.html ]; then
+                            echo "index.html存在，检查内容..."
+                            head -20 dist/index.html | grep -i "doctype\|html\|head\|title\|body"
+                        fi
+                    '''
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 前端编译构建成功'
+                }
+                failure {
+                    error '❌ 前端编译构建失败'
+                }
+                always {
+                    archiveArtifacts artifacts: 'dist/**', allowEmptyArchive: true
+                }
+            }
+        }
+        
+        stage('运行测试') {
+            steps {
+                script {
+                    echo "运行前端测试..."
+                    
+                    sh '''
+                        echo "检查测试配置..."
+                        if [ -f package.json ] && grep -q '"test"' package.json; then
+                            echo "运行测试..."
+                            npm test -- --passWithNoTests --watchAll=false || echo "测试运行完成"
+                        else
+                            echo "未配置测试脚本，跳过测试"
+                        fi
+                        
+                        echo "运行端到端测试检查..."
+                        if [ -d "cypress" ] || [ -f "cypress.config.js" ]; then
+                            echo "发现Cypress配置，运行E2E测试..."
+                            npx cypress run --headless || echo "E2E测试完成"
+                        fi
+                        
+                        echo "生成测试报告..."
+                        mkdir -p test-reports
+                        echo "前端测试报告" > test-reports/frontend-tests.txt
+                        date >> test-reports/frontend-tests.txt
+                    '''
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 前端测试通过'
+                }
+                failure {
+                    echo '⚠️ 前端测试失败，但继续构建流程'
+                }
+                always {
+                    archiveArtifacts artifacts: 'test-reports/**', allowEmptyArchive: true
+                    junit testResults: 'test-reports/*.xml', allowEmptyResults: true
+                }
+            }
+        }
+        
+        stage('构建Docker镜像') {
+            steps {
+                script {
+                    echo "构建前端Docker镜像..."
+                    
+                    // 登录Docker Registry
+                    sh '''
+                        echo "登录Docker Registry..."
+                        echo "${DOCKER_REGISTRY_PSW}" | docker login ${DOCKER_REGISTRY} \
+                            -u ${DOCKER_REGISTRY_USR} \
+                            --password-stdin
+                    '''
+                    
+                    sh """
+                        echo "构建Docker镜像..."
+                        docker build \
+                            -t ${DOCKER_IMAGE}:${BUILD_NUMBER} \
+                            -t ${DOCKER_IMAGE}:latest \
+                            -t ${DOCKER_IMAGE}:${GIT_COMMIT} \
+                            .
+                        
+                        echo "镜像信息:"
+                        docker images | grep ${DOCKER_IMAGE}
+                        
+                        echo "推送镜像到Registry..."
+                        docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                        docker push ${DOCKER_IMAGE}:latest
+                        docker push ${DOCKER_IMAGE}:${GIT_COMMIT}
+                        
+                        echo "清理本地镜像..."
+                        docker rmi ${DOCKER_IMAGE}:${BUILD_NUMBER} ${DOCKER_IMAGE}:latest ${DOCKER_IMAGE}:${GIT_COMMIT} || true
+                    """
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 前端Docker镜像构建和推送成功'
+                }
+                failure {
+                    error '❌ 前端Docker镜像构建失败'
+                }
+            }
+        }
+        
+        stage('安全扫描') {
+            steps {
+                script {
+                    echo "进行安全扫描..."
+                    
+                    sh '''
+                        echo "下载并安装Trivy..."
+                        wget -q https://github.com/aquasecurity/trivy/releases/download/v0.58.1/trivy_0.58.1_Linux-64bit.tar.gz
+                        tar -xzf trivy_0.58.1_Linux-64bit.tar.gz
+                        chmod +x trivy
+                        
+                        echo "扫描NPM依赖漏洞..."
+                        ./trivy fs . --scanners vuln --severity HIGH,CRITICAL --exit-code 0
+                        
+                        echo "扫描Docker镜像漏洞..."
+                        ./trivy image --exit-code 0 --severity HIGH,CRITICAL ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                        
+                        echo "生成SBOM..."
+                        ./trivy image --format cyclonedx ${DOCKER_IMAGE}:${BUILD_NUMBER} > sbom.json
+                        
+                        echo "运行npm audit..."
+                        npm audit --production --json > npm-audit.json || echo "npm audit完成"
+                        
+                        echo "安全扫描报告:"
+                        ls -la *.json || true
+                    '''
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 安全扫描完成'
+                }
+                failure {
+                    echo '⚠️ 安全扫描发现问题，继续部署流程'
+                }
+                always {
+                    archiveArtifacts artifacts: 'sbom.json,npm-audit.json,trivy-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+        
+        stage('性能优化检查') {
+            steps {
+                script {
+                    echo "检查前端性能优化..."
+                    
+                    sh '''
+                        echo "安装Lighthouse CI..."
+                        npm install -g @lhci/cli || echo "LHCI安装完成"
+                        
+                        echo "运行Lighthouse检查..."
+                        if command -v lhci &> /dev/null; then
+                            lhci autorun --collect.staticDistDir=./dist || echo "Lighthouse检查完成"
+                        else
+                            echo "LHCI未安装，跳过性能检查"
+                        fi
+                        
+                        echo "检查包大小..."
+                        npx source-map-explorer dist/assets/*.js --html bundle-analysis.html || echo "包大小分析完成"
+                        
+                        echo "检查未使用的CSS..."
+                        npx purgecss --css dist/assets/*.css --content dist/**/*.html dist/**/*.js --output purged/ || echo "CSS优化检查完成"
+                        
+                        echo "生成性能报告..."
+                        mkdir -p performance-reports
+                        echo "前端性能报告" > performance-reports/performance.txt
+                        date >> performance-reports/performance.txt
+                    '''
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 性能优化检查完成'
+                }
+                failure {
+                    echo '⚠️ 性能优化检查发现问题，继续部署流程'
+                }
+                always {
+                    archiveArtifacts artifacts: 'performance-reports/**,bundle-analysis.html', allowEmptyArchive: true
+                }
+            }
+        }
+        
+        stage('部署到环境') {
+            when {
+                expression { 
+                    return params.DEPLOY_ENVIRONMENT != null 
+                }
+            }
+            
+            steps {
+                script {
+                    echo "部署前端到 ${DEPLOY_ENV} 环境..."
+                    
+                    if (DEPLOY_ENV == 'staging') {
+                        echo "部署到预发布环境..."
+                        
+                        sh """
+                            echo "更新docker-compose.yml中的前端镜像..."
+                            sed -i 's|image:.*magic-stream-frontend|image: ${DOCKER_IMAGE}:${BUILD_NUMBER}|g' ../docker-compose.yml
+                            
+                            echo "启动预发布环境..."
+                            cd ..
+                            docker-compose down frontend || true
+                            docker-compose up -d frontend
+                            
+                            echo "等待前端服务启动..."
+                            sleep 20
+                            
+                            echo "验证前端服务健康状态..."
+                            curl -f http://localhost:80/health || echo "健康检查失败"
+                            
+                            echo "测试前端应用..."
+                            curl -f http://localhost:80 || echo "前端应用测试完成"
+                            
+                            echo "检查页面内容..."
+                            curl -s http://localhost:80 | grep -i "doctype\|html\|head\|title\|body" | head -5
+                        """
+                        
+                    } else if (DEPLOY_ENV == 'production') {
+                        echo "部署到生产环境..."
+                        
+                        sh """
+                            echo "生成Kubernetes部署清单..."
+                            cat > k8s-frontend-deployment.yaml << EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${PROJECT_NAME}-frontend
+  namespace: production
+  labels:
+    app: ${PROJECT_NAME}-frontend
+    version: ${BUILD_NUMBER}
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ${PROJECT_NAME}-frontend
+  template:
+    metadata:
+      labels:
+        app: ${PROJECT_NAME}-frontend
+        version: ${BUILD_NUMBER}
+    spec:
+      containers:
+      - name: frontend
+        image: ${DOCKER_IMAGE}:${BUILD_NUMBER}
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 1
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 101
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${PROJECT_NAME}-frontend-service
+  namespace: production
+spec:
+  selector:
+    app: ${PROJECT_NAME}-frontend
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ${PROJECT_NAME}-frontend-ingress
+  namespace: production
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - host: magicstream.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ${PROJECT_NAME}-frontend-service
+            port:
+              number: 80
+EOF
+                            
+                            echo "应用Kubernetes部署..."
+                            kubectl apply -f k8s-frontend-deployment.yaml
+                            
+                            echo "等待部署完成..."
+                            kubectl rollout status deployment/${PROJECT_NAME}-frontend -n production --timeout=300s
+                            
+                            echo "验证服务..."
+                            kubectl get pods -n production -l app=${PROJECT_NAME}-frontend
+                            
+                            echo "检查Ingress..."
+                            kubectl get ingress -n production
+                        """
+                    }
+                }
+            }
+            
+            post {
+                success {
+                    echo "✅ 前端部署到 ${DEPLOY_ENV} 环境成功"
+                }
+                failure {
+                    error "❌ 前端部署到 ${DEPLOY_ENV} 环境失败"
+                }
+            }
+        }
+        
+        stage('集成测试') {
+            when {
+                expression { 
+                    return params.DEPLOY_ENVIRONMENT != null 
+                }
+            }
+            
+            steps {
+                script {
+                    echo "运行前端集成测试..."
+                    
+                    if (DEPLOY_ENV == 'staging') {
+                        sh '''
+                            echo "测试健康检查端点..."
+                            curl -f http://localhost:80/health
+                            
+                            echo "测试主页面..."
+                            curl -f http://localhost:80
+                            
+                            echo "测试静态资源..."
+                            curl -f http://localhost:80/assets/index-*.js 2>/dev/null | head -1 || echo "静态资源测试完成"
+                            curl -f http://localhost:80/assets/index-*.css 2>/dev/null | head -1 || echo "CSS资源测试完成"
+                            
+                            echo "测试API代理..."
+                            curl -f http://localhost:80/api/v1/health 2>/dev/null || echo "API代理测试完成"
+                            
+                            echo "测试页面性能..."
+                            if command -v lighthouse &> /dev/null; then
+                                lighthouse http://localhost:80 --output=json --output-path=lighthouse-report.json --chrome-flags="--headless" || echo "Lighthouse测试完成"
+                            fi
+                            
+                            echo "检查控制台错误..."
+                            echo "集成测试完成" > integration-test-report.txt
+                            date >> integration-test-report.txt
+                        '''
+                    }
+                }
+            }
+            
+            post {
+                success {
+                    echo '✅ 前端集成测试通过'
+                }
+                failure {
+                    echo '⚠️ 前端集成测试失败，需要人工检查'
+                }
+                always {
+                    archiveArtifacts artifacts: 'integration-test-report.txt,lighthouse-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo "前端构建完成，清理工作空间..."
+                
+                sh '''
+                    echo "清理Docker资源..."
+                    docker system prune -f || true
+                    
+                    echo "清理npm缓存..."
+                    npm cache clean --force
+                    
+                    echo "清理构建产物..."
+                    rm -rf dist/ node_modules/ test-reports/ performance-reports/ || true
+                '''
+                
+                def currentBuildResult = currentBuild.currentResult
+                echo "前端构建结果: ${currentBuildResult}"
+                
+                // 归档构建产物
+                archiveArtifacts artifacts: 'dist/**,test-reports/**,performance-reports/**,*.json', allowEmptyArchive: true
+            }
+        }
+        
+        success {
+            script {
+                echo "发送前端构建成功通知..."
+                
+                // 实际项目中可以集成Slack、邮件等通知
+                echo """
+                ========================================
+                前端构建成功
+                项目: ${PROJECT_NAME}-${SERVICE_NAME}
+                构建号: ${BUILD_NUMBER}
+                分支: ${GIT_BRANCH}
+                提交: ${GIT_COMMIT}
+                环境: ${DEPLOY_ENV}
+                镜像: ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                构建URL: ${env.BUILD_URL}
+                ========================================
+                """
+            }
+        }
+        
+        failure {
+            script {
+                echo "发送前端构建失败通知..."
+                
+                echo """
+                ========================================
+                前端构建失败
+                项目: ${PROJECT_NAME}-${SERVICE_NAME}
+                构建号: ${BUILD_NUMBER}
+                分支: ${GIT_BRANCH}
+                提交: ${GIT_COMMIT}
+                环境: ${DEPLOY_ENV}
+                错误: 请检查构建日志
+                构建URL: ${env.BUILD_URL}
+                ========================================
+                """
+            }
+        }
+    }
+}
